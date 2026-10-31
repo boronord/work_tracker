@@ -12,9 +12,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Поддерживаем список нескольких админов через запятую в .env (например: ADMIN_TELEGRAM_ID=882492384,123456789)
+// Список адміністраторів через кому в .env (наприклад: ADMIN_TELEGRAM_ID=882492384,123456789)
 const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(id => id.trim());
 
+// Ініціалізація авторизації Google Sheets API
 const auth = new google.auth.GoogleAuth({
   keyFile: 'google-credentials.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -23,7 +24,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-// Вспомогательные функции даты и времени
+// Допоміжні функції для дати та часу
 const getCurrentDate = () => new Date().toISOString().split('T')[0];
 const getCurrentTime = () => new Date().toTimeString().split(' ')[0];
 const getCurrentMonthName = () => {
@@ -32,7 +33,7 @@ const getCurrentMonthName = () => {
   return `${months[d.getMonth()]}_${d.getFullYear()}`;
 };
 
-// Проверка, разрешен ли пользователь в боте (Белый список)
+// Перевірка, чи має користувач доступ до бота (Білий список або Адмін)
 async function isUserAllowed(userId) {
   if (ADMIN_IDS.includes(String(userId))) return true;
   try {
@@ -47,10 +48,18 @@ async function isUserAllowed(userId) {
       }
     }
   } catch (e) {
-    // Если листа Settings еще нет, по умолчанию пускаем только админов
-    console.error('Ошибка проверки белого списка:', e.message);
+    // Якщо лист Settings ще не створено
   }
   return false;
+}
+
+// Middleware для перевірки прав адміністратора в API (захист Mini App)
+function checkAdminAccess(req, res, next) {
+  const userId = req.headers['x-telegram-user-id'];
+  if (!userId || !ADMIN_IDS.includes(String(userId))) {
+    return res.status(403).json({ error: 'Доступ заборонено. Тільки для адміністраторів.' });
+  }
+  next();
 }
 
 const userStates = {};
@@ -67,10 +76,9 @@ if (BASE_URL && BASE_URL.startsWith('https://')) {
 }
 const mainKeyboard = Markup.keyboard(keyboardRows).resize();
 
-// --- API для Mini App ---
+// --- API для Mini App (Захищені перевіркою адміністратора) ---
 
-// Получение полной статистики, сотрудников, ставок и авансов
-app.get('/api/stats', async (req, res) => {
+app.get('/api/stats', checkAdminAccess, async (req, res) => {
   try {
     const attRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
     const devRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
@@ -79,13 +87,13 @@ app.get('/api/stats', async (req, res) => {
     try {
       const setRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Settings!A:C' });
       settingsRows = setRes.data.values || [];
-    } catch (e) { /* лист может отсутствовать */ }
+    } catch (e) {}
 
     let advRows = [];
     try {
       const advRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Advances!A:C' });
       advRows = advRes.data.values || [];
-    } catch (e) { /* лист может отсутствовать */ }
+    } catch (e) {}
 
     res.json({
       attendance: (attRes.data.values || []).slice(1),
@@ -100,9 +108,8 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-// Добавление / удаление разрешенного пользователя (Белый список)
-app.post('/api/allowed-users', async (req, res) => {
-  const { userId, userName, action } = req.body; // action: 'add' or 'remove'
+app.post('/api/allowed-users', checkAdminAccess, async (req, res) => {
+  const { userId, userName, action } = req.body;
   try {
     let rows = [];
     try {
@@ -137,8 +144,7 @@ app.post('/api/allowed-users', async (req, res) => {
   }
 });
 
-// Установка почасовой ставки для сотрудника
-app.post('/api/set-rate', async (req, res) => {
+app.post('/api/set-rate', checkAdminAccess, async (req, res) => {
   const { userId, rate } = req.body;
   try {
     let rows = [];
@@ -171,8 +177,7 @@ app.post('/api/set-rate', async (req, res) => {
   }
 });
 
-// Выдача аванса сотруднику
-app.post('/api/add-advance', async (req, res) => {
+app.post('/api/add-advance', checkAdminAccess, async (req, res) => {
   const { userId, amount } = req.body;
   try {
     try {
@@ -202,22 +207,18 @@ app.post('/api/add-advance', async (req, res) => {
   }
 });
 
-// Закрытие месяца (Архивация данных в новый лист и очистка текущих)
-app.post('/api/close-month', async (req, res) => {
+app.post('/api/close-month', checkAdminAccess, async (req, res) => {
   try {
     const monthSheetName = getCurrentMonthName();
     
-    // 1. Получаем текущие данные Attendance и Devices
     const attRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
     const devRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
 
-    // 2. Создаем новый лист под архив месяца
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
       resource: { requests: [{ addSheet: { properties: { title: monthSheetName } } }] }
     });
 
-    // 3. Записываем архив в новый лист
     let archiveData = [
       ['--- ATTENDANCE ---'],
       ...(attRes.data.values || []),
@@ -233,7 +234,6 @@ app.post('/api/close-month', async (req, res) => {
       resource: { values: archiveData }
     });
 
-    // 4. Очищаем текущие таблицы Attendance и Devices (оставляем шапки)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: 'Attendance!A:F',
@@ -250,12 +250,12 @@ app.post('/api/close-month', async (req, res) => {
 
     res.json({ success: true, sheetName: monthSheetName });
   } catch (err) {
-    console.error('Ошибка закрытия месяца:', err);
+    console.error('Помилка закриття місяця:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Телеграм бот логика с проверкой доступа ---
+// --- Телеграм бот ---
 
 bot.command('start', async (ctx) => {
   const userId = ctx.from.id;
@@ -423,18 +423,7 @@ bot.on('text', async (ctx) => {
       spreadsheetId: SPREADSHEET_ID,
       range: 'Devices!A:F',
       valueInputOption: 'USER_ENTERED',
-      resource: { values: [[getCurrentDate(), userId, ctx.from.first_name, getCurrentTime(), '', 'In_Progress']] }
-    });
-    // Исправлено: сохраняем серійний номер корректно (вместо имени в 3-й столбец)
-    // Корректируем последнюю запись:
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
-    const rows = res.data.values;
-    rows[rows.length - 1][2] = serial; // заменяем имя на серийный номер в колонке C
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `Devices!A1:F${rows.length}`,
-      valueInputOption: 'USER_ENTERED',
-      resource: { values: rows }
+      resource: { values: [[getCurrentDate(), userId, serial, getCurrentTime(), '', 'In_Progress']] }
     });
     await ctx.reply(`🔧 Пристрій \`${serial}\` додано в роботу.`, { parse_mode: 'Markdown', ...mainKeyboard });
   }
