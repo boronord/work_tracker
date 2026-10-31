@@ -12,10 +12,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Отримуємо список адміністраторів з .env (підтримка кількох ID через кому)
-const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(id => id.trim());
+// Список адміністраторів для отримання сповіщень (через кому в .env)
+const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(id => id.trim()).filter(Boolean);
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '12345';
 
-// Ініціалізація авторизації Google Sheets API
+// Ініціалізація Google Sheets API
 const auth = new google.auth.GoogleAuth({
   keyFile: 'google-credentials.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -24,7 +25,6 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-// Допоміжні функції для дати та часу
 const getCurrentDate = () => new Date().toISOString().split('T')[0];
 const getCurrentTime = () => new Date().toTimeString().split(' ')[0];
 const getCurrentMonthName = () => {
@@ -33,34 +33,11 @@ const getCurrentMonthName = () => {
   return `${months[d.getMonth()]}_${d.getFullYear()}`;
 };
 
-// Перевірка, чи має користувач доступ до бота (Білий список або Адмін)
-async function isUserAllowed(userId) {
-  if (ADMIN_IDS.includes(String(userId))) return true;
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Settings!A:C',
-    });
-    const rows = res.data.values || [];
-    for (let row of rows) {
-      if (row[0] === 'ALLOWED_USER' && String(row[1]) === String(userId)) {
-        return true;
-      }
-    }
-  } catch (e) {
-    // Якщо лист Settings ще не створено
-  }
-  return false;
-}
-
-// Middleware для перевірки прав адміністратора в API (захист Mini App)
-function checkAdminAccess(req, res, next) {
-  const userId = req.headers['x-telegram-user-id'];
-  console.log('Отримано запит від Telegram User ID:', userId);
-  console.log('Дозволені адміністратори (ADMIN_IDS):', ADMIN_IDS);
-
-  if (!userId || !ADMIN_IDS.includes(String(userId).trim())) {
-    return res.status(403).json({ error: 'Доступ заборонено. Тільки для адміністраторів.' });
+// Мідлваре перевірки пароля для запитів до API
+function checkPasswordAuth(req, res, next) {
+  const providedPassword = req.headers['x-admin-password'];
+  if (!providedPassword || providedPassword !== ADMIN_PASSWORD) {
+    return res.status(403).json({ error: 'Невірний пароль доступу' });
   }
   next();
 }
@@ -79,9 +56,35 @@ if (BASE_URL && BASE_URL.startsWith('https://')) {
 }
 const mainKeyboard = Markup.keyboard(keyboardRows).resize();
 
-// --- API для Mini App (Захищені перевіркою адміністратора) ---
+// --- ЕНДПОІНТ АВТОРИЗАЦІЇ ТА СПОВІЩЕНЬ ---
+app.post('/api/login', async (req, res) => {
+  const { password, telegramUser } = req.body;
+  
+  if (!password || password !== ADMIN_PASSWORD) {
+    return.status(403).json({ success: false, error: 'Невірний пароль' });
+  }
 
-app.get('/api/stats', checkAdminAccess, async (req, res) => {
+  // Надсилаємо сповіщення всім адміністраторам
+  if (telegramUser) {
+    const userInfo = `👤 Користувач: ${telegramUser.first_name || 'Невідомо'} (@${telegramUser.username || 'немає'}, ID: \`${telegramUser.id}\`)`;
+    const time = new Date().toLocaleString('uk-UA', { timeZone: 'Europe/Kyiv' });
+    const message = `🚨 **Вхід в адмін-панель!**\n\n${userInfo}\n⏱ Час: ${time}`;
+
+    for (const adminId of ADMIN_IDS) {
+      try {
+        await bot.telegram.sendMessage(adminId, message, { parse_mode: 'Markdown' });
+      } catch (e) {
+        console.error(`Не вдалося надіслати сповіщення адміну ${adminId}:`, e.message);
+      }
+    }
+  }
+
+  res.json({ success: true });
+});
+
+// --- ЗАХИЩЕНЕ API ДЛЯ MINI APP ---
+
+app.get('/api/stats', checkPasswordAuth, async (req, res) => {
   try {
     const attRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
     const devRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
@@ -102,8 +105,7 @@ app.get('/api/stats', checkAdminAccess, async (req, res) => {
       attendance: (attRes.data.values || []).slice(1),
       devices: (devRes.data.values || []).slice(1),
       settings: settingsRows,
-      advances: advRows.slice(1),
-      admins: ADMIN_IDS
+      advances: advRows.slice(1)
     });
   } catch (err) {
     console.error('API Error:', err);
@@ -111,7 +113,7 @@ app.get('/api/stats', checkAdminAccess, async (req, res) => {
   }
 });
 
-app.post('/api/allowed-users', checkAdminAccess, async (req, res) => {
+app.post('/api/allowed-users', checkPasswordAuth, async (req, res) => {
   const { userId, userName, action } = req.body;
   try {
     let rows = [];
@@ -147,7 +149,7 @@ app.post('/api/allowed-users', checkAdminAccess, async (req, res) => {
   }
 });
 
-app.post('/api/set-rate', checkAdminAccess, async (req, res) => {
+app.post('/api/set-rate', checkPasswordAuth, async (req, res) => {
   const { userId, rate } = req.body;
   try {
     let rows = [];
@@ -180,7 +182,7 @@ app.post('/api/set-rate', checkAdminAccess, async (req, res) => {
   }
 });
 
-app.post('/api/add-advance', checkAdminAccess, async (req, res) => {
+app.post('/api/add-advance', checkPasswordAuth, async (req, res) => {
   const { userId, amount } = req.body;
   try {
     try {
@@ -210,7 +212,7 @@ app.post('/api/add-advance', checkAdminAccess, async (req, res) => {
   }
 });
 
-app.post('/api/close-month', checkAdminAccess, async (req, res) => {
+app.post('/api/close-month', checkPasswordAuth, async (req, res) => {
   try {
     const monthSheetName = getCurrentMonthName();
     
@@ -261,17 +263,11 @@ app.post('/api/close-month', checkAdminAccess, async (req, res) => {
 // --- Телеграм бот ---
 
 bot.command('start', async (ctx) => {
-  const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) {
-    return ctx.reply('⛔ У вас немає доступу до цього бота. Зверніться до адміністратора.');
-  }
   await ctx.reply('Вітаю! Оберіть потрібну дію за допомогою меню нижче:', mainKeyboard);
 });
 
 const handleIn = async (ctx) => {
   const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) return ctx.reply('⛔ Доступ заборонено.');
-  
   const userName = ctx.from.first_name || 'Співробітник';
   const date = getCurrentDate();
   const time = getCurrentTime();
@@ -306,8 +302,6 @@ bot.hears('📥 Прихід', handleIn);
 
 const handleOut = async (ctx) => {
   const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) return ctx.reply('⛔ Доступ заборонено.');
-
   const date = getCurrentDate();
   const time = getCurrentTime();
 
@@ -347,14 +341,12 @@ bot.command('out', handleOut);
 bot.hears('📤 Відхід', handleOut);
 
 bot.hears('🔧 Взяти пристрій', async (ctx) => {
-  if (!await isUserAllowed(ctx.from.id)) return;
   userStates[ctx.from.id] = 'WAITING_FOR_SERIAL';
   await ctx.reply('Введіть серійний номер пристрою:', Markup.forceReply());
 });
 
 bot.hears('📋 Завершити пристрій', async (ctx) => {
   const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) return;
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
   const rows = res.data.values || [];
   const active = [];
@@ -382,7 +374,6 @@ bot.action(/^finish_(\d+)$/, async (ctx) => {
 
 bot.hears('⚠️ Проблема з пристроєм', async (ctx) => {
   const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) return;
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
   const rows = res.data.values || [];
   const active = [];
@@ -409,7 +400,6 @@ bot.action(/^problem_(\d+)$/, async (ctx) => {
 
 bot.hears('📊 Скільки пристроїв у роботі', async (ctx) => {
   const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) return;
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
   const rows = res.data.values || [];
   const count = rows.slice(1).filter(d => String(d[1]) === String(userId) && (d[5] === 'In_Progress' || d[5] === 'Problem') && !d[4]).length;
@@ -418,7 +408,6 @@ bot.hears('📊 Скільки пристроїв у роботі', async (ctx) 
 
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
-  if (!await isUserAllowed(userId)) return;
   if (userStates[userId] === 'WAITING_FOR_SERIAL') {
     const serial = ctx.message.text.trim();
     delete userStates[userId];

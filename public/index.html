@@ -25,17 +25,18 @@
     button.action-btn { background: #007aff; color: white; border: none; padding: 10px; width: 100%; border-radius: 6px; font-weight: bold; cursor: pointer; }
     button.danger-btn { background: #ff3b30; }
     .worker-detail { background: #fafbfc; padding: 10px; border-radius: 8px; margin-top: 10px; border-left: 3px solid #007aff; }
-    #access-denied { text-align: center; padding: 50px 20px; display: none; }
-    #access-denied h2 { color: #ff3b30; }
+    #login-screen { text-align: center; padding: 40px 20px; display: none; }
+    #login-screen h2 { color: #007aff; }
   </style>
 </head>
 <body>
 
-  <!-- Экран блокировки для чужих и браузера -->
-  <div id="access-denied">
-    <h2>⛔ Доступ заборонено</h2>
-    <p>Ця сторінка доступна лише адміністраторам через Telegram Mini App.</p>
-    <p id="debug-info" style="font-size: 11px; color: #999; margin-top: 15px;"></p>
+  <!-- Экран входа по паролю -->
+  <div id="login-screen" class="card">
+    <h2>🔐 Вхід в адмін-панель</h2>
+    <p>Будь ласка, введіть пароль адміністратора:</p>
+    <input type="password" id="admin-password-input" placeholder="Пароль" style="max-width: 250px; margin: 10px auto;">
+    <button class="action-btn" style="max-width: 250px;" onclick="login()">Увійти</button>
   </div>
 
   <!-- Основное содержимое панели -->
@@ -93,82 +94,70 @@
 
   <script>
     let globalData = {};
-    let telegramUserId = null;
-
-    // Надійне витягування ID користувача з Telegram WebApp
-    function getTelegramUserId() {
-      const tg = window.Telegram?.WebApp;
-      if (!tg) return null;
-
-      // 1. Пробуємо через initDataUnsafe
-      if (tg.initDataUnsafe?.user?.id) {
-        return tg.initDataUnsafe.user.id;
-      }
-
-      // 2. Пробуємо розпарсити initData рядок (надійніше для деяких клієнтів)
-      if (tg.initData) {
-        try {
-          const urlParams = new URLSearchParams(tg.initData);
-          const userStr = urlParams.get('user');
-          if (userStr) {
-            const userObj = JSON.parse(userStr);
-            if (userObj?.id) return userObj.id;
-          }
-        } catch (e) {
-          console.error('Помилка парсингу initData:', e);
-        }
-      }
-
-      return null;
-    }
 
     async function init() {
-      let attempts = 0;
-      while (attempts < 15) {
-        const tg = window.Telegram?.WebApp;
-        if (tg) {
-          tg.expand();
-          telegramUserId = getTelegramUserId();
-          if (telegramUserId) break;
-        }
-        await new Promise(r => setTimeout(r, 100));
-        attempts++;
+      const tg = window.Telegram?.WebApp;
+      if (tg) tg.expand();
+
+      const savedPassword = localStorage.getItem('admin_password');
+      if (!savedPassword) {
+        document.getElementById('login-screen').style.display = 'block';
+        return;
       }
-
-      // Якщо ви тестуєте локально у браузері і хочете пропустити перевірку для відладки,
-      // можете розкоментувати рядок нижче:
-      // telegramUserId = 882492384;
-
-      console.log('Визначено Telegram User ID на фронтенді:', telegramUserId);
 
       try {
         const res = await fetch('/api/stats', {
-          headers: { 'x-telegram-user-id': String(telegramUserId || '') }
+          headers: { 'x-admin-password': savedPassword }
         });
         
-        if (!res.ok) {
-          throw new Error('Unauthorized');
-        }
+        if (!res.ok) throw new Error('Unauthorized');
 
         globalData = await res.json();
-        document.getElementById('access-denied').style.display = 'none';
+        document.getElementById('login-screen').style.display = 'none';
         document.getElementById('app-content').style.display = 'block';
         updateDashboard();
       } catch (err) {
-        console.error('Помилка доступу:', err);
+        console.error('Помилка авторизації:', err);
+        localStorage.removeItem('admin_password');
         document.getElementById('app-content').style.display = 'none';
-        document.getElementById('access-denied').style.display = 'block';
-        document.getElementById('debug-info').innerText = `Отриманий ID: ${telegramUserId || 'відсутній'}`;
+        document.getElementById('login-screen').style.display = 'block';
+      }
+    }
+
+    async function login() {
+      const pwd = document.getElementById('admin-password-input').value.trim();
+      if (!pwd) return alert('Введіть пароль!');
+
+      // Витягуємо інформацію про користувача з Telegram WebApp
+      const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user || null;
+
+      try {
+        const res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd, telegramUser: tgUser })
+        });
+
+        const data = await res.json();
+        if (!data.success) throw new Error('Wrong password');
+
+        localStorage.setItem('admin_password', pwd);
+        init();
+      } catch (e) {
+        alert('Невірний пароль!');
       }
     }
 
     async function apiFetch(url, options = {}) {
+      const savedPassword = localStorage.getItem('admin_password');
       options.headers = options.headers || {};
-      options.headers['x-telegram-user-id'] = String(telegramUserId || '');
+      options.headers['x-admin-password'] = savedPassword || '';
       options.headers['Content-Type'] = 'application/json';
       
       const res = await fetch(url, options);
       if (res.status === 403) {
+        localStorage.removeItem('admin_password');
+        location.reload();
         throw new Error('Access Denied');
       }
       return res.json();
