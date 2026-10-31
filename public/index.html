@@ -3,151 +3,265 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Адмін-панель Майстерні</title>
+  <title>Адмін-панель майстерні</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--tg-theme-bg-color, #f4f4f5);
-      color: var(--tg-theme-text-color, #18181b);
-      margin: 0;
-      padding: 16px;
-    }
-    h2 { margin-top: 0; }
-    .card {
-      background-color: var(--tg-theme-secondary-bg-color, #ffffff);
-      border-radius: 12px;
-      padding: 16px;
-      margin-bottom: 16px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    }
-    .stat-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    .stat-box {
-      background: rgba(0,0,0,0.03);
-      padding: 12px;
-      border-radius: 8px;
-      text-align: center;
-    }
-    .stat-value {
-      font-size: 20px;
-      font-weight: bold;
-      color: var(--tg-theme-button-color, #2563eb);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 10px;
-      font-size: 13px;
-    }
-    th, td {
-      padding: 8px 4px;
-      text-align: left;
-      border-bottom: 1px solid rgba(0,0,0,0.08);
-    }
-    th { font-weight: 600; color: #71717a; }
-    .rate-input {
-      width: 60px;
-      padding: 4px;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; margin: 0; padding: 15px; color: #333; }
+    h2 { font-size: 20px; margin-bottom: 10px; }
+    .tabs { display: flex; gap: 5px; margin-bottom: 15px; background: #e2e8f0; padding: 4px; border-radius: 8px; }
+    .tab-btn { flex: 1; padding: 8px; border: none; background: none; font-weight: bold; cursor: pointer; border-radius: 6px; font-size: 13px; }
+    .tab-btn.active { background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); color: #007aff; }
+    .section { display: none; }
+    .section.active { display: block; }
+    .card { background: #fff; padding: 15px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+    .stats-row { display: flex; gap: 10px; margin-bottom: 10px; }
+    .stat-box { flex: 1; background: #f0f4f8; padding: 10px; border-radius: 8px; text-align: center; }
+    .stat-box h3 { margin: 0; font-size: 18px; color: #007aff; }
+    .stat-box p { margin: 5px 0 0; font-size: 12px; color: #666; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+    th, td { padding: 8px; text-align: left; border-bottom: 1px solid #eee; }
+    th { color: #888; font-weight: 600; }
+    input, select { width: 100%; padding: 8px; margin-top: 5px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+    button.action-btn { background: #007aff; color: white; border: none; padding: 10px; width: 100%; border-radius: 6px; font-weight: bold; cursor: pointer; }
+    button.danger-btn { background: #ff3b30; }
+    .worker-detail { background: #fafbfc; padding: 10px; border-radius: 8px; margin-top: 10px; border-left: 3px solid #007aff; }
   </style>
 </head>
 <body>
-  <h2>📊 Адмін-панель табеля</h2>
-  
-  <div class="card">
-    <h3>Загальна статистика</h3>
-    <div class="stat-grid">
-      <div class="stat-box">
-        <div class="stat-value" id="totalHours">0</div>
-        <div>Всього годин</div>
+
+  <h2>📊 Адмін-панель майстерні</h2>
+
+  <!-- Вкладки (Подразделы) -->
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('stats')">Статистика & ЗП</button>
+    <button class="tab-btn" onclick="switchTab('access')">Доступи та Ставки</button>
+    <button class="tab-btn" onclick="switchTab('month')">Закриття місяця</button>
+  </div>
+
+  <!-- 1. РАЗДЕЛ: Статистика и ЗП -->
+  <div id="section-stats" class="section active">
+    <div class="card">
+      <h3>Загальна статистика</h3>
+      <div class="stats-row">
+        <div class="stat-box">
+          <h3 id="total-hours">0.0</h3>
+          <p>Всього годин</p>
+        </div>
+        <div class="stat-box">
+          <h3 id="total-devices">0</h3>
+          <p>Пристроїв у роботі</p>
+        </div>
       </div>
-      <div class="stat-box">
-        <div class="stat-value" id="totalDevices">0</div>
-        <div>Пристроїв у роботі</div>
+    </div>
+
+    <div class="card">
+      <h3>💰 Розрахунок зарплати та аванси</h3>
+      <label>Фільтр по працівнику:</label>
+      <select id="worker-select" onchange="renderWorkerStats()">
+        <option value="all">Усі працівники (разом)</option>
+      </select>
+
+      <div id="worker-info" class="worker-detail">
+        <!-- Динамическая детальная инфо -->
       </div>
     </div>
   </div>
 
-  <div class="card">
-    <h3>💰 Розрахунок зарплати</h3>
-    <label>Годинна ставка (грн/год): </label>
-    <input type="number" id="hourlyRate" class="rate-input" value="150" onchange="calculateSalary()">
-    
-    <table>
-      <thead>
-        <tr>
-          <th>Співробітник</th>
-          <th>Години</th>
-          <th>До виплати</th>
-        </tr>
-      </thead>
-      <tbody id="salaryTable">
-        <tr><td colspan="3">Завантаження...</td></tr>
-      </tbody>
-    </table>
+  <!-- 2. РАЗДЕЛ: Доступы и Ставки -->
+  <div id="section-access" class="section">
+    <div class="card">
+      <h3>1. Дозвіл на доступ у бот</h3>
+      <p style="font-size: 12px; color: #666;">Користувачі поза цим списком не зможуть користуватися ботом.</p>
+      <input type="text" id="new-user-id" placeholder="Telegram ID працівника (напр. 882492384)">
+      <input type="text" id="new-user-name" placeholder="Ім'я працівника">
+      <button class="action-btn" onclick="allowUser('add')">Додати користувача</button>
+      
+      <h4>Список дозволених:</h4>
+      <div id="allowed-users-list"></div>
+    </div>
+
+    <div class="card">
+      <h3>2. Погодинна ставка (грн/год)</h3>
+      <div id="rates-container"></div>
+    </div>
+  </div>
+
+  <!-- 3. РАЗДЕЛ: Закрытие месяца -->
+  <div id="section-month" class="section">
+    <div class="card">
+      <h3>Архів та Закриття місяця</h3>
+      <p style="font-size: 13px; color: #555;">При натисканні кнопки вся статистика поточного місяця автоматично збережеться в новий лист Google Таблиці (названий поточним місяцем і роком), після чого поточні таблиці будуть обнулені для нового місяця.</p>
+      <button class="action-btn danger-btn" onclick="closeMonth()">Закрити місяць та перенести в архів</button>
+    </div>
   </div>
 
   <script>
-    const tg = window.Telegram.WebApp;
-    tg.expand();
+    let globalData = {};
 
-    let attendanceData = [];
+    function switchTab(tabId) {
+      document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('section-' + tabId).classList.add('active');
+      event.target.classList.add('active');
+    }
 
     async function loadData() {
-      try {
-        const res = await fetch('/api/stats');
-        const data = await res.json();
-        
-        attendanceData = data.attendance || [];
-        document.getElementById('totalDevices').innerText = data.activeDevicesCount || 0;
-        
-        renderSalary();
-      } catch (e) {
-        console.error("Помилка завантаження даних", e);
-      }
+      const res = await fetch('/api/stats');
+      globalData = await res.json();
+      updateDashboard();
     }
 
-    function renderSalary() {
-      const rate = parseFloat(document.getElementById('hourlyRate').value) || 0;
-      const userSummary = {};
-      let grandTotalHours = 0;
+    function updateDashboard() {
+      const attendance = globalData.attendance || [];
+      const devices = globalData.devices || [];
+      const settings = globalData.settings || [];
+      const advances = globalData.advances || [];
 
-      attendanceData.forEach(row => {
-        const name = row[2] || 'Невідомий';
-        const hours = parseFloat(row[5]) || 0;
+      // Общие часы
+      let totalHours = attendance.reduce((sum, row) => sum + (parseFloat(row[5]) || 0), 0);
+      let activeDevs = devices.filter(d => (d[5] === 'In_Progress' || d[5] === 'Problem') && !d[4]).length;
+      
+      document.getElementById('total-hours').innerText = totalHours.toFixed(1);
+      document.getElementById('total-devices').innerText = activeDevs;
 
-        if (!userSummary[name]) userSummary[name] = 0;
-        userSummary[name] += hours;
-        grandTotalHours += hours;
+      // Сбор уникальных сотрудников
+      const workersMap = {};
+      attendance.forEach(row => {
+        if (!workersMap[row[1]]) workersMap[row[1]] = { id: row[1], name: row[2], hours: 0, days: [] };
+        workersMap[row[1]].hours += parseFloat(row[5]) || 0;
+        workersMap[row[1]].days.push(row);
       });
 
-      document.getElementById('totalHours').innerText = grandTotalHours.toFixed(1);
+      // Заполняем селект выбора работника
+      const select = document.getElementById('worker-select');
+      const currentSelected = select.value;
+      select.innerHTML = '<option value="all">Усі працівники (разом)</option>';
+      Object.values(workersMap).forEach(w => {
+        select.innerHTML += `<option value="${w.id}">${w.name} (ID: ${w.id})</option>`;
+      });
+      select.value = currentSelected;
 
-      const tbody = document.getElementById('salaryTable');
-      tbody.innerHTML = '';
+      renderWorkerStats();
+      renderAccessSettings(workersMap, settings);
+    }
 
-      Object.keys(userSummary).forEach(name => {
-        const hours = userSummary[name];
-        const salary = (hours * rate).toFixed(2);
-        
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><b>${name}</b></td>
-          <td>${hours.toFixed(2)} год</td>
-          <td><b>${salary} грн</b></td>
+    function renderWorkerStats() {
+      const workerId = document.getElementById('worker-select').value;
+      const attendance = globalData.attendance || [];
+      const devices = globalData.devices || [];
+      const settings = globalData.settings || [];
+      const advances = globalData.advances || [];
+
+      let html = '';
+      if (workerId === 'all') {
+        // Сводка по всем
+        let totalH = attendance.reduce((acc, r) => acc + (parseFloat(r[5]) || 0), 0);
+        html = `<b>Загальні показники:</b><br>Відпрацьовано годин: ${totalH.toFixed(2)} год`;
+      } else {
+        const workerAtt = attendance.filter(r => String(r[1]) === String(workerId));
+        const workerDevs = devices.filter(d => String(d[1]) === String(workerId));
+        const totalH = workerAtt.reduce((acc, r) => acc + (parseFloat(r[5]) || 0), 0);
+
+        // Получаем ставку сотрудника
+        let rateSetting = settings.find(s => s[0] === 'RATE' && String(s[1]) === String(workerId));
+        let rate = rateSetting ? parseFloat(rateSetting[2]) : 150;
+
+        // Авансы сотрудника
+        let workerAdvances = advances.filter(a => String(a[1]) === String(workerId));
+        let totalAdv = workerAdvances.reduce((acc, a) => acc + (parseFloat(a[2]) || 0), 0);
+
+        let salaryBeforeAdv = totalH * rate;
+        let finalSalary = salaryBeforeAdv - totalAdv;
+
+        html = `
+          <b>Працівник:</b> ID ${workerId}<br>
+          <b>Ставка:</b> <input type="number" value="${rate}" style="width:80px;display:inline-block;" onchange="setRate('${workerId}', this.value)"> грн/год<br>
+          <b>Всього годин:</b> ${totalH.toFixed(2)} год<br>
+          <b>Нараховано ЗП:</b> ${salaryBeforeAdv.toFixed(2)} грн<br>
+          <b>Видано авансів:</b> ${totalAdv.toFixed(2)} грн 
+          <button onclick="promptAdvance('${workerId}')" style="font-size:11px;padding:2px 6px;">+ Дати аванс</button><br>
+          <b>До виплати (з урахуванням авансу):</b> <span style="color:green;font-weight:bold;">${finalSalary.toFixed(2)} грн</span>
+          
+          <h4 style="margin:10px 0 5px;">Статистика по днях:</h4>
+          <table>
+            <tr><th>Дата</th><th>Прихід</th><th>Ухід</th><th>Годин</th><th>Пристроїв</th></tr>
         `;
-        tbody.appendChild(tr);
-      });
+
+        workerAtt.forEach(row => {
+          let dayDevs = workerDevs.filter(d => d[0] === row[0]).length;
+          html += `<tr><td>${row[0]}</td><td>${row[3]}</td><td>${row[4]||'-'}</td><td>${row[5]||'0'}</td><td>${dayDevs}</td></tr>`;
+        });
+        html += `</table>`;
+      }
+
+      document.getElementById('worker-info').innerHTML = html;
     }
 
-    function calculateSalary() {
-      renderSalary();
+    function renderAccessSettings(workersMap, settings) {
+      let allowedListHtml = '';
+      settings.filter(s => s[0] === 'ALLOWED_USER').forEach(u => {
+        allowedListHtml += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;font-size:13px;">
+          <span>${u[2]} (ID: ${u[1]})</span>
+          <button class="danger-btn" style="width:auto;padding:2px 6px;font-size:11px;" onclick="allowUser('remove', '${u[1]}')">Видалити</button>
+        </div>`;
+      });
+      document.getElementById('allowed-users-list').innerHTML = allowedListHtml || '<p style="font-size:12px;color:#777;">Список порожній</p>';
+
+      let ratesHtml = '';
+      Object.values(workersMap).forEach(w => {
+        let currentRate = settings.find(s => s[0] === 'RATE' && String(s[1]) === String(w.id));
+        let rateVal = currentRate ? currentRate[2] : 150;
+        ratesHtml += `
+          <label>${w.name} (ID: ${w.id}):</label>
+          <input type="number" value="${rateVal}" onchange="setRate('${w.id}', this.value)">
+        `;
+      });
+      document.getElementById('rates-container').innerHTML = ratesHtml || '<p style="font-size:12px;color:#777;">Немає активних працівників</p>';
+    }
+
+    async function allowUser(action, userIdParam = null) {
+      let userId = userIdParam || document.getElementById('new-user-id').value.trim();
+      let userName = document.getElementById('new-user-name').value.trim() || 'Співробітник';
+      if (!userId) return alert('Введіть ID користувача!');
+
+      await fetch('/api/allowed-users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, userName, action })
+      });
+      loadData();
+    }
+
+    async function setRate(userId, rate) {
+      await fetch('/api/set-rate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, rate })
+      });
+      loadData();
+    }
+
+    async function promptAdvance(userId) {
+      let amount = prompt('Введіть суму авансу (грн):');
+      if (!amount) return;
+      await fetch('/api/add-advance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, amount: parseFloat(amount) })
+      });
+      loadData();
+    }
+
+    async function closeMonth() {
+      if (!confirm('Ви дійсно хочете закрити місяць? Дані будуть перенесені в архівний лист Google Таблиці, а поточні таблиці очищені!')) return;
+      const res = await fetch('/api/close-month', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        alert('Місяць успішно закрито! Архів збережено на лист: ' + data.sheetName);
+        loadData();
+      } else {
+        alert('Помилка: ' + data.error);
+      }
     }
 
     loadData();

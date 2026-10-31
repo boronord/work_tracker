@@ -7,10 +7,14 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
-const ADMIN_ID = process.env.ADMIN_TELEGRAM_ID || null;
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Ініціалізація авторизації Google Sheets API через сервісний акаунт
+const bot = new Telegraf(process.env.BOT_TOKEN);
+
+// Поддерживаем список нескольких админов через запятую в .env (например: ADMIN_TELEGRAM_ID=882492384,123456789)
+const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(id => id.trim());
+
 const auth = new google.auth.GoogleAuth({
   keyFile: 'google-credentials.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -19,395 +23,422 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-// Роздача статичних файлів для Mini App
-app.use(express.static(path.join(__dirname, 'public')));
-
-// API для Telegram Mini App
-app.get('/api/stats', async (req, res) => {
-  try {
-    const attRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Attendance!A:F',
-    });
-    const devRes = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Devices!A:F',
-    });
-
-    const attendance = (attRes.data.values || []).slice(1);
-    const devices = (devRes.data.values || []).slice(1);
-
-    const activeDevicesCount = devices.filter(d => (d[5] === 'In_Progress' || d[5] === 'Problem') && !d[4]).length;
-
-    res.json({ attendance, activeDevicesCount });
-  } catch (err) {
-    console.error('Помилка API stats:', err);
-    res.status(500).json({ error: 'Помилка читання даних' });
-  }
-});
-
-// Допоміжні функції для дати та часу
+// Вспомогательные функции даты и времени
 const getCurrentDate = () => new Date().toISOString().split('T')[0];
 const getCurrentTime = () => new Date().toTimeString().split(' ')[0];
+const getCurrentMonthName = () => {
+  const d = new Date();
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  return `${months[d.getMonth()]}_${d.getFullYear()}`;
+};
 
-// Зберігання тимчасових станів користувачів (для очікування серійного номера)
+// Проверка, разрешен ли пользователь в боте (Белый список)
+async function isUserAllowed(userId) {
+  if (ADMIN_IDS.includes(String(userId))) return true;
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Settings!A:C',
+    });
+    const rows = res.data.values || [];
+    for (let row of rows) {
+      if (row[0] === 'ALLOWED_USER' && String(row[1]) === String(userId)) {
+        return true;
+      }
+    }
+  } catch (e) {
+    // Если листа Settings еще нет, по умолчанию пускаем только админов
+    console.error('Ошибка проверки белого списка:', e.message);
+  }
+  return false;
+}
+
 const userStates = {};
-
-// Динамічне визначення URL для Mini App (працює і локально, і на Render з HTTPS)
 const BASE_URL = process.env.RENDER_EXTERNAL_URL;
 
-// Формуємо основне меню
 const keyboardRows = [
   ['📥 Прихід', '📤 Відхід'],
   ['🔧 Взяти пристрій', '📋 Завершити пристрій'],
   ['⚠️ Проблема з пристроєм', '📊 Скільки пристроїв у роботі']
 ];
 
-// Додаємо кнопку Mini App лише тоді, коли є реальна HTTPS-адреса (у хмарі Render)
 if (BASE_URL && BASE_URL.startsWith('https://')) {
   keyboardRows.push([Markup.button.webApp('🖥 Адмін-панель (Mini App)', BASE_URL)]);
 }
-
 const mainKeyboard = Markup.keyboard(keyboardRows).resize();
 
-// Команда /start для появи меню
+// --- API для Mini App ---
+
+// Получение полной статистики, сотрудников, ставок и авансов
+app.get('/api/stats', async (req, res) => {
+  try {
+    const attRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
+    const devRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
+    
+    let settingsRows = [];
+    try {
+      const setRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Settings!A:C' });
+      settingsRows = setRes.data.values || [];
+    } catch (e) { /* лист может отсутствовать */ }
+
+    let advRows = [];
+    try {
+      const advRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Advances!A:C' });
+      advRows = advRes.data.values || [];
+    } catch (e) { /* лист может отсутствовать */ }
+
+    res.json({
+      attendance: (attRes.data.values || []).slice(1),
+      devices: (devRes.data.values || []).slice(1),
+      settings: settingsRows,
+      advances: advRows.slice(1),
+      admins: ADMIN_IDS
+    });
+  } catch (err) {
+    console.error('API Error:', err);
+    res.status(500).json({ error: 'Помилка читання даних' });
+  }
+});
+
+// Добавление / удаление разрешенного пользователя (Белый список)
+app.post('/api/allowed-users', async (req, res) => {
+  const { userId, userName, action } = req.body; // action: 'add' or 'remove'
+  try {
+    let rows = [];
+    try {
+      const setRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Settings!A:C' });
+      rows = setRes.data.values || [];
+    } catch (e) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SPREADSHEET_ID,
+        resource: { requests: [{ addSheet: { properties: { title: 'Settings' } } }] }
+      });
+    }
+
+    if (action === 'add') {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: 'Settings!A:C',
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: [['ALLOWED_USER', userId, userName]] }
+      });
+    } else if (action === 'remove') {
+      const updatedRows = rows.filter(r => !(r[0] === 'ALLOWED_USER' && String(r[1]) === String(userId)));
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Settings!A1:C${updatedRows.length || 1}`,
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: updatedRows.length ? updatedRows : [['', '', '']] }
+      });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Установка почасовой ставки для сотрудника
+app.post('/api/set-rate', async (req, res) => {
+  const { userId, rate } = req.body;
+  try {
+    let rows = [];
+    try {
+      const setRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Settings!A:C' });
+      rows = setRes.data.values || [];
+    } catch (e) {}
+
+    let found = false;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] === 'RATE' && String(rows[i][1]) === String(userId)) {
+        rows[i][2] = rate;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      rows.push(['RATE', userId, rate]);
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Settings!A1:C${rows.length}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: rows }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Выдача аванса сотруднику
+app.post('/api/add-advance', async (req, res) => {
+  const { userId, amount } = req.body;
+  try {
+    try {
+      await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Advances!A:C' });
+    } catch (e) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SPREADSHEET_ID,
+        resource: { requests: [{ addSheet: { properties: { title: 'Advances' } } }] }
+      });
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: 'Advances!A:C',
+        valueInputOption: 'USER_ENTERED',
+        resource: { values: [['Date', 'UserId', 'Amount']] }
+      });
+    }
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Advances!A:C',
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [[getCurrentDate(), userId, amount]] }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Закрытие месяца (Архивация данных в новый лист и очистка текущих)
+app.post('/api/close-month', async (req, res) => {
+  try {
+    const monthSheetName = getCurrentMonthName();
+    
+    // 1. Получаем текущие данные Attendance и Devices
+    const attRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
+    const devRes = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
+
+    // 2. Создаем новый лист под архив месяца
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      resource: { requests: [{ addSheet: { properties: { title: monthSheetName } } }] }
+    });
+
+    // 3. Записываем архив в новый лист
+    let archiveData = [
+      ['--- ATTENDANCE ---'],
+      ...(attRes.data.values || []),
+      [],
+      ['--- DEVICES ---'],
+      ...(devRes.data.values || [])
+    ];
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${monthSheetName}!A1`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: archiveData }
+    });
+
+    // 4. Очищаем текущие таблицы Attendance и Devices (оставляем шапки)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Attendance!A:F',
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [['Date', 'UserId', 'UserName', 'InTime', 'OutTime', 'Hours']] }
+    });
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Devices!A:F',
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [['Date', 'UserId', 'SerialNumber', 'StartTime', 'EndTime', 'Status']] }
+    });
+
+    res.json({ success: true, sheetName: monthSheetName });
+  } catch (err) {
+    console.error('Ошибка закрытия месяца:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Телеграм бот логика с проверкой доступа ---
+
 bot.command('start', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!await isUserAllowed(userId)) {
+    return ctx.reply('⛔ У вас немає доступу до цього бота. Зверніться до адміністратора.');
+  }
   await ctx.reply('Вітаю! Оберіть потрібну дію за допомогою меню нижче:', mainKeyboard);
 });
 
-// --- 1. ПРИХІД НА РОБОТУ (З ПЕРЕВІРКАМИ) ---
 const handleIn = async (ctx) => {
   const userId = ctx.from.id;
+  if (!await isUserAllowed(userId)) return ctx.reply('⛔ Доступ заборонено.');
+  
   const userName = ctx.from.first_name || 'Співробітник';
   const date = getCurrentDate();
   const time = getCurrentTime();
 
   try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Attendance!A:F',
-    });
-    
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
     const rows = res.data.values || [];
     let hasToday = false;
-    let unclosedPastDate = null;
 
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][1]) === String(userId)) {
-        const rowDate = rows[i][0];
-        const inTime = rows[i][3];
-        const outTime = rows[i][4];
-
-        if (rowDate === date) {
-          hasToday = true;
-        }
-        if (rowDate !== date && inTime && !outTime) {
-          unclosedPastDate = rowDate;
-        }
+      if (String(rows[i][1]) === String(userId) && rows[i][0] === date) {
+        hasToday = true;
       }
     }
 
-    if (hasToday) {
-      return ctx.reply('⚠️ Ви вже зареєстрували прихід сьогодні. Повторна реєстрація неможлива.', mainKeyboard);
-    }
-
-    if (unclosedPastDate) {
-      const adminMsg = `⚠️ Увага! У співробітника ${userName} (ID: ${userId}) виявлено незакритий робочий день від ${unclosedPastDate} (відсутній ухід).`;
-      if (ADMIN_ID) {
-        await bot.telegram.sendMessage(ADMIN_ID, adminMsg).catch(() => {});
-      }
-      return ctx.reply(`⚠️ У вас є незакритий робочий день від ${unclosedPastDate} без відмітки уходу! Адміністратора сповіщено для виправлення в Google Таблиці.`, mainKeyboard);
-    }
+    if (hasToday) return ctx.reply('⚠️ Ви вже зареєстрували прихід сьогодні.', mainKeyboard);
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: 'Attendance!A:F',
       valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[date, userId, userName, time, '', '']]
-      }
+      resource: { values: [[date, userId, userName, time, '', '']] }
     });
-    await ctx.reply(`✅ Прихід зафіксовано о ${time}. Доброго робочого дня, ${userName}!`, mainKeyboard);
+    await ctx.reply(`✅ Прихід зафіксовано о ${time}. Доброго дня, ${userName}!`, mainKeyboard);
   } catch (err) {
-    console.error('Помилка запису приходу:', err);
-    await ctx.reply('❌ Помилка під час запису в Google Таблицю.', mainKeyboard);
+    await ctx.reply('❌ Помилка запису в Google Таблицю.', mainKeyboard);
   }
 };
 
 bot.command('in', handleIn);
 bot.hears('📥 Прихід', handleIn);
 
-// --- 2. ВІДБУТТЯ З РОБОТИ (З ПЕРЕВІРКАМИ) ---
 const handleOut = async (ctx) => {
   const userId = ctx.from.id;
-  const userName = ctx.from.first_name || 'Співробітник';
+  if (!await isUserAllowed(userId)) return ctx.reply('⛔ Доступ заборонено.');
+
   const date = getCurrentDate();
   const time = getCurrentTime();
 
   try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Attendance!A:F',
-    });
-    
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Attendance!A:F' });
     const rows = res.data.values || [];
     let todayRowIndex = -1;
-    let alreadyOut = false;
 
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][0] === date && String(rows[i][1]) === String(userId)) {
         todayRowIndex = i + 1;
-        if (rows[i][4]) {
-          alreadyOut = true;
-        }
         break;
       }
     }
 
-    if (todayRowIndex === -1) {
-      const adminMsg = `⚠️ Помилка табеля: співробітник ${userName} (ID: ${userId}) намагався натиснути «Відхід» без попередньої відмітки «Прихід» за сьогодні (${date}).`;
-      if (ADMIN_ID) {
-        await bot.telegram.sendMessage(ADMIN_ID, adminMsg).catch(() => {});
-      }
-      return ctx.reply('⚠️ Ви не робили відмітку приходу сьогодні! Ухід не може бути зафіксований. Адміністратора сповіщено.', mainKeyboard);
-    }
-
-    if (alreadyOut) {
-      return ctx.reply('⚠️ Ви вже зафіксували ухід сьогодні. Повторна відмітка неможлива.', mainKeyboard);
-    }
+    if (todayRowIndex === -1) return ctx.reply('⚠️ Ви не робили відмітку приходу сьогодні!', mainKeyboard);
 
     const checkInTime = rows[todayRowIndex - 1][3];
     const [inH, inM] = checkInTime.split(':').map(Number);
     const [outH, outM] = time.split(':').map(Number);
-    
     const totalHours = Math.max(0, ((outH * 60 + outM) - (inH * 60 + inM)) / 60).toFixed(2);
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `Attendance!E${todayRowIndex}:F${todayRowIndex}`,
       valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[time, totalHours]]
-      }
+      resource: { values: [[time, totalHours]] }
     });
 
-    await ctx.reply(`👋 Відбуття зафіксовано о ${time}. Відпрацьовано годин: ${totalHours}. Гарного відпочинку!`, mainKeyboard);
+    await ctx.reply(`👋 Ухід зафіксовано о ${time}. Відпрацьовано годин: ${totalHours}.`, mainKeyboard);
   } catch (err) {
-    console.error('Помилка запису уходу:', err);
-    await ctx.reply('❌ Помилка під час оновлення таблиці.', mainKeyboard);
+    await ctx.reply('❌ Помилка оновлення таблиці.', mainKeyboard);
   }
 };
 
 bot.command('out', handleOut);
 bot.hears('📤 Відхід', handleOut);
 
-// --- 3. ВЗЯТИ ПРИСТРІЙ У РОБОТУ (ОЧІКУВАННЯ НОМЕРА) ---
 bot.hears('🔧 Взяти пристрій', async (ctx) => {
+  if (!await isUserAllowed(ctx.from.id)) return;
   userStates[ctx.from.id] = 'WAITING_FOR_SERIAL';
-  await ctx.reply('Будь ласка, введіть серійний номер пристрою наступним повідомленням:', Markup.forceReply());
+  await ctx.reply('Введіть серійний номер пристрою:', Markup.forceReply());
 });
 
-async function saveDeviceStart(ctx, serialNumber) {
+bot.hears('📋 Завершити пристрій', async (ctx) => {
   const userId = ctx.from.id;
-  const date = getCurrentDate();
-  const time = getCurrentTime();
+  if (!await isUserAllowed(userId)) return;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
+  const rows = res.data.values || [];
+  const active = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i][1]) === String(userId) && (rows[i][5] === 'In_Progress' || rows[i][5] === 'Problem') && !rows[i][4]) {
+      active.push(Markup.button.callback(`Завершити: ${rows[i][2]}`, `finish_${i + 1}`));
+    }
+  }
+  if (!active.length) return ctx.reply('ℹ️ Немає активних пристроїв.', mainKeyboard);
+  await ctx.reply('Виберіть пристрій для завершення:', Markup.inlineKeyboard(active));
+});
 
-  try {
+bot.action(/^finish_(\d+)$/, async (ctx) => {
+  const row = ctx.match[1];
+  const time = getCurrentTime();
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `Devices!E${row}:F${row}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [[time, 'Completed']] }
+  });
+  await ctx.answerCbQuery('Закрито!');
+  await ctx.editMessageText(`✅ Пристрій успішно завершено о ${time}.`);
+});
+
+bot.hears('⚠️ Проблема з пристроєм', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!await isUserAllowed(userId)) return;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
+  const rows = res.data.values || [];
+  const active = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i][1]) === String(userId) && rows[i][5] === 'In_Progress') {
+      active.push(Markup.button.callback(`Проблема: ${rows[i][2]}`, `problem_${i + 1}`));
+    }
+  }
+  if (!active.length) return ctx.reply('ℹ️ Немає активних пристроїв.', mainKeyboard);
+  await ctx.reply('Виберіть пристрій зі скрутністю:', Markup.inlineKeyboard(active));
+});
+
+bot.action(/^problem_(\d+)$/, async (ctx) => {
+  const row = ctx.match[1];
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `Devices!F${row}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: { values: [['Problem']] }
+  });
+  await ctx.answerCbQuery('Статус змінено!');
+  await ctx.editMessageText('⚠️ Статус змінено на Problem.');
+});
+
+bot.hears('📊 Скільки пристроїв у роботі', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!await isUserAllowed(userId)) return;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
+  const rows = res.data.values || [];
+  const count = rows.slice(1).filter(d => String(d[1]) === String(userId) && (d[5] === 'In_Progress' || d[5] === 'Problem') && !d[4]).length;
+  await ctx.reply(`📊 У вас зараз у роботі пристроїв: ${count}`, mainKeyboard);
+});
+
+bot.on('text', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!await isUserAllowed(userId)) return;
+  if (userStates[userId] === 'WAITING_FOR_SERIAL') {
+    const serial = ctx.message.text.trim();
+    delete userStates[userId];
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: 'Devices!A:F',
       valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[date, userId, serialNumber, time, '', 'In_Progress']]
-      }
+      resource: { values: [[getCurrentDate(), userId, ctx.from.first_name, getCurrentTime(), '', 'In_Progress']] }
     });
-    await ctx.reply(`🔧 Пристрій \`${serialNumber}\` успішно взято в роботу о ${time}.`, { parse_mode: 'Markdown', ...mainKeyboard });
-  } catch (err) {
-    console.error('Помилка додавання пристрою:', err);
-    await ctx.reply('❌ Помилка запису пристрою в таблицю.', mainKeyboard);
-  }
-}
-
-// --- 4. ЗАВЕРШИТИ РОБОТУ З ПРИСТРОЄМ (ДЛЯ In_Progress та Problem) ---
-const handleDeviceStop = async (ctx) => {
-  const userId = ctx.from.id;
-
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Devices!A:F',
-    });
-    
-    const rows = res.data.values || [];
-    const activeDevices = [];
-
-    for (let i = 1; i < rows.length; i++) {
-      const status = rows[i][5];
-      const endTime = rows[i][4];
-      if (String(rows[i][1]) === String(userId) && (status === 'In_Progress' || status === 'Problem') && !endTime) {
-        activeDevices.push({ rowIndex: i + 1, serial: rows[i][2] });
-      }
-    }
-
-    if (activeDevices.length === 0) {
-      return ctx.reply('ℹ️ У вас немає активних пристроїв у роботі.', mainKeyboard);
-    }
-
-    const buttons = activeDevices.map(d => [
-      Markup.button.callback(`Завершити: ${d.serial}`, `finish_${d.rowIndex}`)
-    ]);
-
-    await ctx.reply('📋 Виберіть пристрій, роботу над яким ви закінчили:', Markup.inlineKeyboard(buttons));
-  } catch (err) {
-    console.error('Помилка читання пристроїв:', err);
-    await ctx.reply('❌ Помилка під час читання даних із таблиці.', mainKeyboard);
-  }
-};
-
-bot.command('device_stop', handleDeviceStop);
-bot.hears('📋 Завершити пристрій', handleDeviceStop);
-
-bot.action(/^finish_(\d+)$/, async (ctx) => {
-  const rowIndex = ctx.match[1];
-  const time = getCurrentTime();
-
-  try {
+    // Исправлено: сохраняем серійний номер корректно (вместо имени в 3-й столбец)
+    // Корректируем последнюю запись:
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: 'Devices!A:F' });
+    const rows = res.data.values;
+    rows[rows.length - 1][2] = serial; // заменяем имя на серийный номер в колонке C
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Devices!E${rowIndex}:F${rowIndex}`,
+      range: `Devices!A1:F${rows.length}`,
       valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [[time, 'Completed']]
-      }
+      resource: { values: rows }
     });
-
-    await ctx.answerCbQuery('Пристрій успішно закрито!');
-    await ctx.editMessageText(`✅ Робота над пристроєм завершена о ${time}.`);
-  } catch (err) {
-    console.error('Помилка закриття пристрою:', err);
-    await ctx.answerCbQuery('❌ Помилка збереження.');
+    await ctx.reply(`🔧 Пристрій \`${serial}\` додано в роботу.`, { parse_mode: 'Markdown', ...mainKeyboard });
   }
 });
 
-// --- 5. ПОЗНАЧИТИ ПРОБЛЕМУ З ПРИСТРОЄМ ---
-const handleDeviceProblem = async (ctx) => {
-  const userId = ctx.from.id;
-
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Devices!A:F',
-    });
-    
-    const rows = res.data.values || [];
-    const activeDevices = [];
-
-    for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][1]) === String(userId) && rows[i][5] === 'In_Progress') {
-        activeDevices.push({ rowIndex: i + 1, serial: rows[i][2] });
-      }
-    }
-
-    if (activeDevices.length === 0) {
-      return ctx.reply('ℹ️ У вас немає активних пристроїв у роботі.', mainKeyboard);
-    }
-
-    const buttons = activeDevices.map(d => [
-      Markup.button.callback(`Проблема: ${d.serial}`, `problem_${d.rowIndex}`)
-    ]);
-
-    await ctx.reply('⚠️ Виберіть пристрій, з яким виникла проблема:', Markup.inlineKeyboard(buttons));
-  } catch (err) {
-    console.error('Помилка читання пристроїв:', err);
-    await ctx.reply('❌ Помилка під час читання даних із таблиці.', mainKeyboard);
-  }
-};
-
-bot.command('device_problem', handleDeviceProblem);
-bot.hears('⚠️ Проблема з пристроєм', handleDeviceProblem);
-
-bot.action(/^problem_(\d+)$/, async (ctx) => {
-  const rowIndex = ctx.match[1];
-  const time = getCurrentTime();
-
-  try {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `Devices!F${rowIndex}`,
-      valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [['Problem']]
-      }
-    });
-
-    await ctx.answerCbQuery('Статус змінено на Problem!');
-    await ctx.editMessageText(`⚠️ Статус пристрою змінено на **Problem** о ${time}.`, { parse_mode: 'Markdown' });
-  } catch (err) {
-    console.error('Помилка оновлення статусу пристрою:', err);
-    await ctx.answerCbQuery('❌ Помилка збереження.');
-  }
-});
-
-// --- 6. КІЛЬКІСТЬ ПРИСТРОЇВ У РОБОТІ ---
-const handleActiveCount = async (ctx) => {
-  const userId = ctx.from.id;
-
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SPREADSHEET_ID,
-      range: 'Devices!A:F',
-    });
-    
-    const rows = res.data.values || [];
-    const activeDevices = [];
-
-    for (let i = 1; i < rows.length; i++) {
-      const status = rows[i][5];
-      const endTime = rows[i][4];
-      if (String(rows[i][1]) === String(userId) && (status === 'In_Progress' || status === 'Problem') && !endTime) {
-        activeDevices.push({ serial: rows[i][2], status: status, time: rows[i][3] });
-      }
-    }
-
-    if (activeDevices.length === 0) {
-      return ctx.reply('ℹ️ У вас немає активних пристроїв у роботі.', mainKeyboard);
-    }
-
-    let message = `📊 У вас зараз у роботі пристроїв: *${activeDevices.length}*:\n\n`;
-    activeDevices.forEach((d, index) => {
-      const statusText = d.status === 'Problem' ? '⚠️ Проблема' : '🔧 У роботі';
-      message += `${index + 1}. Серійний номер: \`${d.serial}\`\n   • Статус: *${statusText}*\n   • Час початку: ${d.time}\n\n`;
-    });
-
-    await ctx.reply(message, { parse_mode: 'Markdown', ...mainKeyboard });
-  } catch (err) {
-    console.error('Помилка підрахунку пристроїв:', err);
-    await ctx.reply('❌ Помилка під час читання даних із таблиці.', mainKeyboard);
-  }
-};
-
-bot.command('devices_count', handleActiveCount);
-bot.hears('📊 Скільки пристроїв у роботі', handleActiveCount);
-
-// --- УНІВЕРСАЛЬНИЙ ОБРОБНИК ТЕКСТУ (ОЧІКУВАННЯ СЕРІЙНОГО НОМЕРА) ---
-bot.on('text', async (ctx) => {
-  const userId = ctx.from.id;
-
-  if (userStates[userId] === 'WAITING_FOR_SERIAL') {
-    const serialNumber = ctx.message.text.trim();
-    delete userStates[userId];
-    await saveDeviceStart(ctx, serialNumber);
-  }
-});
-
-// Запуск веб-сервера Express та Telegram-бота
-app.listen(PORT, () => {
-  console.log(`🌐 Веб-сервер Mini App запущено на порту ${PORT}`);
-});
-
-bot.launch().then(() => {
-  console.log('🤖 Бот успішно запущений і працює!');
-});
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+app.listen(PORT, () => console.log(`🚀 Сервер запущено на порту ${PORT}`));
+bot.launch();
