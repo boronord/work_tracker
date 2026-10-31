@@ -61,7 +61,7 @@ app.post('/api/login', async (req, res) => {
   const { password, telegramUser } = req.body;
   
   if (!password || password !== ADMIN_PASSWORD) {
-    return.status(403).json({ success: false, error: 'Невірний пароль' });
+    return res.status(403).json({ success: false, error: 'Невірний пароль' });
   }
 
   // Надсилаємо сповіщення всім адміністраторам
