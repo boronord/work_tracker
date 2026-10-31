@@ -35,6 +35,7 @@
   <div id="access-denied">
     <h2>⛔ Доступ заборонено</h2>
     <p>Ця сторінка доступна лише адміністраторам через Telegram Mini App.</p>
+    <p id="debug-info" style="font-size: 11px; color: #999; margin-top: 15px;"></p>
   </div>
 
   <!-- Основное содержимое панели -->
@@ -94,23 +95,51 @@
     let globalData = {};
     let telegramUserId = null;
 
+    // Надійне витягування ID користувача з Telegram WebApp
+    function getTelegramUserId() {
+      const tg = window.Telegram?.WebApp;
+      if (!tg) return null;
+
+      // 1. Пробуємо через initDataUnsafe
+      if (tg.initDataUnsafe?.user?.id) {
+        return tg.initDataUnsafe.user.id;
+      }
+
+      // 2. Пробуємо розпарсити initData рядок (надійніше для деяких клієнтів)
+      if (tg.initData) {
+        try {
+          const urlParams = new URLSearchParams(tg.initData);
+          const userStr = urlParams.get('user');
+          if (userStr) {
+            const userObj = JSON.parse(userStr);
+            if (userObj?.id) return userObj.id;
+          }
+        } catch (e) {
+          console.error('Помилка парсингу initData:', e);
+        }
+      }
+
+      return null;
+    }
+
     async function init() {
-      // Чекаємо ініціалізації Telegram WebApp (до 1.5 секунди)
       let attempts = 0;
       while (attempts < 15) {
         const tg = window.Telegram?.WebApp;
         if (tg) {
           tg.expand();
-          if (tg.initDataUnsafe?.user) {
-            telegramUserId = tg.initDataUnsafe.user.id;
-            break;
-          }
+          telegramUserId = getTelegramUserId();
+          if (telegramUserId) break;
         }
         await new Promise(r => setTimeout(r, 100));
         attempts++;
       }
 
-      console.log('Виявлено Telegram User ID:', telegramUserId);
+      // Якщо ви тестуєте локально у браузері і хочете пропустити перевірку для відладки,
+      // можете розкоментувати рядок нижче:
+      // telegramUserId = 882492384;
+
+      console.log('Визначено Telegram User ID на фронтенді:', telegramUserId);
 
       try {
         const res = await fetch('/api/stats', {
@@ -129,6 +158,7 @@
         console.error('Помилка доступу:', err);
         document.getElementById('app-content').style.display = 'none';
         document.getElementById('access-denied').style.display = 'block';
+        document.getElementById('debug-info').innerText = `Отриманий ID: ${telegramUserId || 'відсутній'}`;
       }
     }
 
