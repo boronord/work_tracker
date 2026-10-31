@@ -1,0 +1,19 @@
+{
+  "name": "work-tracker",
+  "version": "1.0.0",
+  "description": "Telegram work and device tracker bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "googleapis": "^189.0.0",
+    "telegraf": "^4.16.3"
+  }
+}

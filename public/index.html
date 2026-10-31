@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Адмін-панель Майстерні</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--tg-theme-bg-color, #f4f4f5);
+      color: var(--tg-theme-text-color, #18181b);
+      margin: 0;
+      padding: 16px;
+    }
+    h2 { margin-top: 0; }
+    .card {
+      background-color: var(--tg-theme-secondary-bg-color, #ffffff);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .stat-box {
+      background: rgba(0,0,0,0.03);
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .stat-value {
+      font-size: 20px;
+      font-weight: bold;
+      color: var(--tg-theme-button-color, #2563eb);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 8px 4px;
+      text-align: left;
+      border-bottom: 1px solid rgba(0,0,0,0.08);
+    }
+    th { font-weight: 600; color: #71717a; }
+    .rate-input {
+      width: 60px;
+      padding: 4px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h2>📊 Адмін-панель табеля</h2>
+  
+  <div class="card">
+    <h3>Загальна статистика</h3>
+    <div class="stat-grid">
+      <div class="stat-box">
+        <div class="stat-value" id="totalHours">0</div>
+        <div>Всього годин</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-value" id="totalDevices">0</div>
+        <div>Пристроїв у роботі</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>💰 Розрахунок зарплати</h3>
+    <label>Годинна ставка (грн/год): </label>
+    <input type="number" id="hourlyRate" class="rate-input" value="150" onchange="calculateSalary()">
+    
+    <table>
+      <thead>
+        <tr>
+          <th>Співробітник</th>
+          <th>Години</th>
+          <th>До виплати</th>
+        </tr>
+      </thead>
+      <tbody id="salaryTable">
+        <tr><td colspan="3">Завантаження...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+
+    let attendanceData = [];
+
+    async function loadData() {
+      try {
+        const res = await fetch('/api/stats');
+        const data = await res.json();
+        
+        attendanceData = data.attendance || [];
+        document.getElementById('totalDevices').innerText = data.activeDevicesCount || 0;
+        
+        renderSalary();
+      } catch (e) {
+        console.error("Помилка завантаження даних", e);
+      }
+    }
+
+    function renderSalary() {
+      const rate = parseFloat(document.getElementById('hourlyRate').value) || 0;
+      const userSummary = {};
+      let grandTotalHours = 0;
+
+      attendanceData.forEach(row => {
+        const name = row[2] || 'Невідомий';
+        const hours = parseFloat(row[5]) || 0;
+
+        if (!userSummary[name]) userSummary[name] = 0;
+        userSummary[name] += hours;
+        grandTotalHours += hours;
+      });
+
+      document.getElementById('totalHours').innerText = grandTotalHours.toFixed(1);
+
+      const tbody = document.getElementById('salaryTable');
+      tbody.innerHTML = '';
+
+      Object.keys(userSummary).forEach(name => {
+        const hours = userSummary[name];
+        const salary = (hours * rate).toFixed(2);
+        
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><b>${name}</b></td>
+          <td>${hours.toFixed(2)} год</td>
+          <td><b>${salary} грн</b></td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function calculateSalary() {
+      renderSalary();
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
