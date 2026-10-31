@@ -12,7 +12,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Список адміністраторів через кому в .env (наприклад: ADMIN_TELEGRAM_ID=882492384,123456789)
+// Отримуємо список адміністраторів з .env (підтримка кількох ID через кому)
 const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_ID || '').split(',').map(id => id.trim());
 
 // Ініціалізація авторизації Google Sheets API
@@ -56,7 +56,10 @@ async function isUserAllowed(userId) {
 // Middleware для перевірки прав адміністратора в API (захист Mini App)
 function checkAdminAccess(req, res, next) {
   const userId = req.headers['x-telegram-user-id'];
-  if (!userId || !ADMIN_IDS.includes(String(userId))) {
+  console.log('Отримано запит від Telegram User ID:', userId);
+  console.log('Дозволені адміністратори (ADMIN_IDS):', ADMIN_IDS);
+
+  if (!userId || !ADMIN_IDS.includes(String(userId).trim())) {
     return res.status(403).json({ error: 'Доступ заборонено. Тільки для адміністраторів.' });
   }
   next();

@@ -92,29 +92,29 @@
 
   <script>
     let globalData = {};
-    
-    // Получаем Telegram ID пользователя из объекта WebApp
-    const tg = window.Telegram.WebApp;
-    tg.expand();
-    const user = tg.initDataUnsafe?.user;
-    const telegramUserId = user ? user.id : null;
-
-    async function apiFetch(url, options = {}) {
-      options.headers = options.headers || {};
-      options.headers['x-telegram-user-id'] = telegramUserId;
-      options.headers['Content-Type'] = 'application/json';
-      
-      const res = await fetch(url, options);
-      if (res.status === 403) {
-        throw new Error('Access Denied');
-      }
-      return res.json();
-    }
+    let telegramUserId = null;
 
     async function init() {
+      // Чекаємо ініціалізації Telegram WebApp (до 1.5 секунди)
+      let attempts = 0;
+      while (attempts < 15) {
+        const tg = window.Telegram?.WebApp;
+        if (tg) {
+          tg.expand();
+          if (tg.initDataUnsafe?.user) {
+            telegramUserId = tg.initDataUnsafe.user.id;
+            break;
+          }
+        }
+        await new Promise(r => setTimeout(r, 100));
+        attempts++;
+      }
+
+      console.log('Виявлено Telegram User ID:', telegramUserId);
+
       try {
         const res = await fetch('/api/stats', {
-          headers: { 'x-telegram-user-id': telegramUserId }
+          headers: { 'x-telegram-user-id': String(telegramUserId || '') }
         });
         
         if (!res.ok) {
@@ -122,11 +122,26 @@
         }
 
         globalData = await res.json();
+        document.getElementById('access-denied').style.display = 'none';
         document.getElementById('app-content').style.display = 'block';
         updateDashboard();
       } catch (err) {
+        console.error('Помилка доступу:', err);
+        document.getElementById('app-content').style.display = 'none';
         document.getElementById('access-denied').style.display = 'block';
       }
+    }
+
+    async function apiFetch(url, options = {}) {
+      options.headers = options.headers || {};
+      options.headers['x-telegram-user-id'] = String(telegramUserId || '');
+      options.headers['Content-Type'] = 'application/json';
+      
+      const res = await fetch(url, options);
+      if (res.status === 403) {
+        throw new Error('Access Denied');
+      }
+      return res.json();
     }
 
     function switchTab(tabId) {
